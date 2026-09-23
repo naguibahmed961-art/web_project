@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { supabase } from './lib/supabase';
 import { persist } from "zustand/middleware";
 import type {
   Activity, ActivityKind, Case, CaseFile, CaseNote, CaseStatus, Client,
@@ -213,53 +214,74 @@ export const useStore = create<State>()(
         setSidebar: (open) => set({ sidebarOpen: open }),
         toggleMini: () => set((s) => ({ sidebarMini: !s.sidebarMini })),
 
-        login: (identifier, password) => {
-          const idn = identifier.trim().toLowerCase();
-          const u = get().lawyers.find(
-            (l) => l.email.toLowerCase() === idn || l.name.trim() === identifier.trim(),
-          );
-          if (!u || u.password !== password) return "بيانات الدخول غير صحيحة، تأكد من البريد الإلكتروني وكلمة المرور.";
-          set({ sessionUserId: u.id, nav: { page: "dashboard", intent: null } });
-          set((s) => ({
-            activities: [{ id: uid(), lawyerId: u.id, kind: "auth", text: "تم تسجيل الدخول", at: Date.now() }, ...s.activities],
-          }));
-          toast("success", `مرحباً بعودتك، ${u.name.split(" ").slice(0, 2).join(" ")}`);
-          return null;
-        },
+        login: async (identifier: string, password: string) => {
+          try {
+            const { data, error } = await supabase.auth.signInWithPassword({
+              email: identifier.trim().toLowerCase(),
+              password: password,
+            });
 
-        register: (d, withDemo) => {
-          const email = d.email.trim().toLowerCase();
-          if (get().lawyers.some((l) => l.email.toLowerCase() === email))
-            return "هذا البريد الإلكتروني مسجل مسبقاً، جرّب تسجيل الدخول.";
-          const lawyer: Lawyer = { id: uid(), name: d.name.trim(), email, phone: d.phone.trim(), password: d.password, createdAt: Date.now() };
-          if (withDemo) {
-            const seed = buildSeed();
-            const remap = (arr: { lawyerId: ID }[]) => arr.map((x) => ({ ...x, lawyerId: lawyer.id }));
-            set((s) => ({
-              lawyers: [...s.lawyers, lawyer],
-              sessionUserId: lawyer.id,
-              clients: [...remap(seed.clients) as Client[], ...s.clients],
-              cases: [...remap(seed.cases) as Case[], ...s.cases],
-              hearings: [...remap(seed.hearings) as Hearing[], ...s.hearings],
-              tasks: [...remap(seed.tasks) as Task[], ...s.tasks],
-              templates: [...remap(seed.templates) as Template[], ...s.templates],
-              caseFiles: [...remap(seed.caseFiles) as CaseFile[], ...s.caseFiles],
-              txs: [...remap(seed.txs) as Tx[], ...s.txs],
-              notes: [...remap(seed.notes) as CaseNote[], ...s.notes],
-              activities: [...remap(seed.activities) as Activity[], ...s.activities],
-              nav: { page: "dashboard", intent: null },
-            }));
-          } else {
-            set((s) => ({ lawyers: [...s.lawyers, lawyer], sessionUserId: lawyer.id, nav: { page: "dashboard", intent: null } }));
+            if (error) {
+              return "بيانات الدخول غير صحيحة، تأكد من البريد الإلكتروني وكلمة المرور.";
+            }
+
+            if (data.user) {
+              set({ sessionUserId: data.user.id, nav: { page: "dashboard", intent: null } });
+              toast("success", `مرحباً بعودتك!`);
+              return null;
+            }
+            
+            return "حدث خطأ غير متوقع.";
+          } catch (error) {
+            return "فشل في تسجيل الدخول.";
           }
-          toast("success", `تم إنشاء حسابك بنجاح. أهلاً بك في ميزان، ${lawyer.name}!`);
-          return null;
         },
 
-        logout: () => {
+        register: async (d: {name: string; email: string; phone: string; password: string}, withDemo: boolean) => {
+          try {
+            // 1. إنشاء المستخدم في نظام المصادقة من Supabase
+            const { data: authData, error: authError } = await supabase.auth.signUp({
+              email: d.email.trim().toLowerCase(),
+              password: d.password,
+              options: {
+                data: {
+                  name: d.name.trim(),
+                  phone: d.phone.trim(),
+                }
+              }
+            });
+
+            if (authError) throw authError;
+            if (!authData.user) return "فشل في إنشاء الحساب، يرجى المحاولة لاحقاً.";
+
+            // 2. حفظ البيانات الإضافية في جدول profiles
+            const { error: profileError } = await supabase.from('profiles').insert({
+              id: authData.user.id,
+              name: d.name.trim(),
+              email: d.email.trim().toLowerCase(),
+              phone: d.phone.trim(),
+            });
+
+            if (profileError) throw profileError;
+
+            // 3. تحديث الحالة المحلية
+            set({ sessionUserId: authData.user.id, nav: { page: "dashboard", intent: null } });
+            
+            // (اختياري) إذا أراد المستخدم بيانات تجريبية، يمكن إضافتها هنا لاحقاً عبر Supabase
+            
+            toast("success", `تم إنشاء حسابك بنجاح. أهلاً بك في ميزان، ${d.name}!`);
+            return null;
+          } catch (error: any) {
+            return error.message || "حدث خطأ أثناء إنشاء الحساب.";
+          }
+        },
+
+        logout: async () => {
+          await supabase.auth.signOut();
           set({ sessionUserId: null, sidebarOpen: false });
           toast("info", "تم تسجيل الخروج بأمان.");
         },
+        
 
         addClient: (d) => {
           const c: Client = { ...d, id: uid(), lawyerId: me(), importantDates: [], createdAt: Date.now() };
