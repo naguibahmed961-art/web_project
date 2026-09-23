@@ -23,17 +23,18 @@ export default function Auth() {
     setErrors(e); setFormErr(msg); setShake((x) => x + 1);
   };
 
-  const submitLogin = (e: React.FormEvent) => {
+  const submitLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     const errs: Record<string, string> = {};
     if (!lf.id.trim()) errs.id = "أدخل البريد الإلكتروني أو اسم المستخدم";
     if (!lf.pw) errs.pw = "أدخل كلمة المرور";
     if (Object.keys(errs).length) return fail(errs);
-    const res = login(lf.id, lf.pw);
+    
+    const res = await login(lf.id, lf.pw);  // أضف await هنا
     if (res) return fail({}, res);
   };
 
-  const submitRegister = (e: React.FormEvent) => {
+  const submitRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     const errs: Record<string, string> = {};
     if (rf.name.trim().length < 3) errs.name = "أدخل الاسم الكامل (3 أحرف على الأقل)";
@@ -42,7 +43,8 @@ export default function Auth() {
     if (rf.pw.length < 6) errs.pw = "كلمة المرور يجب ألا تقل عن 6 أحرف";
     if (rf.pw2 !== rf.pw) errs.pw2 = "كلمتا المرور غير متطابقتين";
     if (Object.keys(errs).length) return fail(errs);
-    const res = register({ name: rf.name, email: rf.email, phone: rf.phone, password: rf.pw }, withDemo);
+    
+    const res = await register({ name: rf.name, email: rf.email, phone: rf.phone, password: rf.pw }, withDemo);  // أضف await هنا
     if (res) return fail({}, res);
   };
 
