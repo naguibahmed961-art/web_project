@@ -143,13 +143,124 @@ interface State {
   setSidebar: (open: boolean) => void;
   toggleMini: () => void;
 
-  login: (identifier: string, password: string) => string | null;
-  register: (d: { name: string; email: string; phone: string; password: string }, withDemo: boolean) => string | null;
+  login: async (identifier, password) => {
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: identifier.trim().toLowerCase(),
+        password: password,
+      });
+
+      if (error) {
+        return "بيانات الدخول غير صحيحة، تأكد من البريد الإلكتروني وكلمة المرور.";
+      }
+
+      if (data.user) {
+        set({ sessionUserId: data.user.id, nav: { page: "dashboard", intent: null } });
+        
+        // تحميل البيانات من Supabase
+        await loadData(data.user.id);
+        
+        toast("success", "مرحباً بعودتك!");
+        return null;
+      }
+      
+      return "حدث خطأ غير متوقع.";
+    } catch (error) {
+      return "فشل في تسجيل الدخول.";
+    }
+  },
+  register: async (d, withDemo) => {
+    try {
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email: d.email.trim().toLowerCase(),
+        password: d.password,
+        options: {
+          data: {
+            name: d.name.trim(),
+            phone: d.phone.trim(),
+          }
+        }
+      });
+
+      if (authError) throw authError;
+      if (!authData.user) return "فشل في إنشاء الحساب، يرجى المحاولة لاحقاً.";
+
+      const { error: profileError } = await supabase.from('profiles').insert({
+        id: authData.user.id,
+        name: d.name.trim(),
+        email: d.email.trim().toLowerCase(),
+        phone: d.phone.trim(),
+      });
+
+      if (profileError) throw profileError;
+
+      set({ sessionUserId: authData.user.id, nav: { page: "dashboard", intent: null } });
+      
+      // تحميل البيانات (ستكون فارغة في البداية)
+      await loadData(authData.user.id);
+      
+      toast("success", `تم إنشاء حسابك بنجاح. أهلاً بك في ميزان، ${d.name}!`);
+      return null;
+    } catch (error: any) {
+      return error.message || "حدث خطأ أثناء إنشاء الحساب.";
+    }
+  },
   logout: () => void;
 
-  addClient: (d: Omit<Client, "id" | "lawyerId" | "createdAt" | "importantDates">) => void;
-  updateClient: (id: ID, d: Partial<Client>) => void;
-  deleteClient: (id: ID) => void;
+  addClient: async (d) => {
+    const userId = get().sessionUserId as string;
+    const c: any = { ...d, id: uid(), lawyer_id: userId, important_dates: [], created_at: new Date().toISOString() };
+    
+    const { error } = await supabase.from('clients').insert([c]);
+    
+    if (error) {
+      toast("error", "فشل في إضافة الموكل");
+      return;
+    }
+    
+    set((s) => ({ clients: [c, ...s.clients] }));
+    log("client", `تمت إضافة موكل جديد: ${c.name}`);
+    toast("success", `تمت إضافة الموكل «${c.name}»`);
+  },
+  updateClient: async (id, d) => {
+    const { error } = await supabase.from('clients').update(d).eq('id', id);
+    
+    if (error) {
+      toast("error", "فشل في تحديث الموكل");
+      return;
+    }
+    
+    set((s) => ({ clients: s.clients.map((c) => (c.id === id ? { ...c, ...d } : c)) }));
+    toast("success", "تم حفظ تعديلات الموكل");
+  },
+  deleteClient: async (id) => {
+    const { error } = await supabase.from('clients').delete().eq('id', id);
+    
+    if (error) {
+      toast("error", "فشل في حذف الموكل");
+      return;
+    }
+    
+    const caseIds = get().cases.filter((c) => c.client_id === id).map((c) => c.id);
+    const name = get().clients.find((c) => c.id === id)?.name ?? "";
+    
+    set((s) => ({
+      clients: s.clients.filter((c) => c.id !== id),
+      cases: s.cases.filter((c) => c.client_id !== id),
+      hearings: s.hearings.filter((x) => !caseIds.includes(x.case_id)),
+      notes: s.notes.filter((x) => !caseIds.includes(x.case_id)),
+      caseFiles: s.caseFiles.filter((x) => !caseIds.includes(x.case_id)),
+      tasks: s.tasks.map((t) => ({
+        ...t,
+        case_id: t.case_id && caseIds.includes(t.case_id) ? undefined : t.case_id,
+        client_id: t.client_id === id ? undefined : t.client_id,
+      })),
+      txs: s.txs.filter((x) => x.client_id !== id),
+    }));
+    
+    log("client", `تم حذف الموكل «${name}» و${caseIds.length} قضية مرتبطة به`);
+    toast("success", `تم حذف الموكل «${name}»`);
+  },
   addImportantDate: (clientId: ID, label: string, date: string) => void;
   removeImportantDate: (clientId: ID, dateId: ID) => void;
 
@@ -184,6 +295,47 @@ const nextHearingOf = (hs: Hearing[], caseId: ID) => {
     .filter((x) => x.caseId === caseId && x.date >= todayISO())
     .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
   return upcoming[0];
+};
+
+/* ---------------- تحميل البيانات من Supabase ---------------- */
+const loadData = async (lawyerId: string) => {
+  try {
+    const [
+      { data: clients },
+      { data: cases },
+      { data: hearings },
+      { data: tasks },
+      { data: templates },
+      { data: caseFiles },
+      { data: txs },
+      { data: notes },
+      { data: activities },
+    ] = await Promise.all([
+      supabase.from('clients').select('*').eq('lawyer_id', lawyerId),
+      supabase.from('cases').select('*').eq('lawyer_id', lawyerId),
+      supabase.from('hearings').select('*').eq('lawyer_id', lawyerId),
+      supabase.from('tasks').select('*').eq('lawyer_id', lawyerId),
+      supabase.from('templates').select('*').eq('lawyer_id', lawyerId),
+      supabase.from('case_files').select('*').eq('lawyer_id', lawyerId),
+      supabase.from('txs').select('*').eq('lawyer_id', lawyerId),
+      supabase.from('notes').select('*').eq('lawyer_id', lawyerId),
+      supabase.from('activities').select('*').eq('lawyer_id', lawyerId),
+    ]);
+
+    set({
+      clients: (clients || []) as any,
+      cases: (cases || []) as any,
+      hearings: (hearings || []) as any,
+      tasks: (tasks || []) as any,
+      templates: (templates || []) as any,
+      caseFiles: (caseFiles || []) as any,
+      txs: (txs || []) as any,
+      notes: (notes || []) as any,
+      activities: (activities || []) as any,
+    });
+  } catch (error) {
+    console.error('Error loading data:', error);
+  }
 };
 
 export const useStore = create<State>()(
@@ -471,18 +623,7 @@ export const useStore = create<State>()(
     {
       name: "mezan-v1",
       partialize: (s) => ({
-        lawyers: s.lawyers,
         sessionUserId: s.sessionUserId,
-        clients: s.clients,
-        cases: s.cases,
-        hearings: s.hearings,
-        tasks: s.tasks,
-        templates: s.templates,
-        caseFiles: s.caseFiles,
-        txs: s.txs,
-        notes: s.notes,
-        activities: s.activities,
-        readNotifs: s.readNotifs,
         nav: s.nav,
         sidebarMini: s.sidebarMini,
       }),
